@@ -47,6 +47,10 @@ retrieval module, and a multi-agent workflow.
 
 ---
 
+**Deep dive:** [`HOW-IT-WORKS.md`](./HOW-IT-WORKS.md) — a step-by-step walkthrough
+of both systems, the reasoning behind every design decision, how the project was
+built and in what order, and the known limitations.
+
 ## A note on how this was built
 
 Each part was verified by running it, not by inspection. That surfaced a number
