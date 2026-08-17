@@ -53,22 +53,14 @@ EXPORT_PATH = Path(__file__).resolve().parent / EXPORT_FILENAME
 # Langflow's bundled dropdown still lists gemini-2.5-flash, which now returns 404
 # for new API keys -- the option list is stale, so model names are set explicitly.
 #
-# Each agent runs on a DIFFERENT model on purpose. The Gemini free tier meters
-# requests per model (20 RPM each), and a single user message can cost six or more
-# model calls once tool loops are counted. Spreading the three agents across three
-# models triples the effective headroom, which is what makes a 6-7 message live
-# demo survivable. The assignment does not pin a model, and the capability
-# ordering also matches the work: routing judgement is the hardest job.
-# gemini-3.7-flash is deliberately avoided: its free tier allows only ~20
-# requests per DAY, which one debugging session exhausts. These three have
-# materially larger free quotas.
-# All three verified to (a) call a tool for a data question and (b) NOT call one
-# for a greeting -- the selective-activation behaviour the whole design depends on.
-# The Orchestrator gets the strongest of the three because routing is the hardest
-# judgement; the other two mostly follow instructions.
-ORCHESTRATOR_MODEL = "gemini-3.6-flash"
-ANALYSIS_MODEL = "gemini-3.1-flash-lite"
-RESPONSE_MODEL = "gemini-3.1-flash-lite-preview"
+# All three agents share one model. An earlier version deliberately spread them
+# across three, because Gemini's FREE tier meters 20 requests per day per model
+# and one message costs several once tool loops are counted. With billing enabled
+# that constraint is gone, and one model is simpler to reason about and to explain.
+AGENT_MODEL = "gemini-3.6-flash"
+ORCHESTRATOR_MODEL = AGENT_MODEL
+ANALYSIS_MODEL = AGENT_MODEL
+RESPONSE_MODEL = AGENT_MODEL
 POSTGRES_URL_VAR = "SUPPORT_DATABASE_URL"
 GEMINI_KEY_VAR = "GEMINI_API_KEY"
 GMAIL_ADDRESS_VAR = "GMAIL_ADDRESS"

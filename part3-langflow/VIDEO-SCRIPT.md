@@ -10,7 +10,7 @@ spending the fewest possible model calls.
 
 - [ ] Postgres running, `support_requests` seeded (5 rows)
 - [ ] Langflow running with `LANGFLOW_COMPONENTS_PATH` and `LANGFLOW_SSRF_ALLOWED_HOSTS`
-- [ ] Billing enabled on the Gemini key (otherwise you will hit a 429 mid-take)
+- [ ] Billing enabled on the Gemini key (done — verified, quota lifted)
 - [ ] Flow open, canvas zoomed so all 10 nodes are visible
 - [ ] A terminal window ready with the `curl` command pasted but not run
 - [ ] Close any tab showing an API key
@@ -77,6 +77,14 @@ logic rather than just the output.
 **7.** `Email John Smith about his login issue`
 > Now the full chain: look up John, then compose and send. This is where the
 > Gmail tool activates.
+
+*Known cosmetic issue on this path only: the answer prints twice. Langflow
+flattens nested agent-as-tool output into the parent's text, so the Response
+Agent's reply and the Orchestrator's copy of it are concatenated. The content is
+correct; it is repeated. If you would rather avoid it on camera, use this instead
+— it skips the database lookup, so only one agent produces text:*
+
+> `Send an email to john@example.com saying his ticket is being reviewed`
 
 *Note: with the app password unset, this returns a clean handled failure —* "the
 email was NOT sent" *with the reason. Call that out deliberately:*
@@ -154,7 +162,21 @@ Show the exported JSON, search for `AIza` / `AQ.` → no matches.
 
 ---
 
+## Verified rehearsal results
+
+All seven messages were run end-to-end after billing was enabled. Observed:
+
+| # | Message | Tools called | Correct? |
+| - | ------- | ------------ | -------- |
+| 1 | Hi there | **none** | ✅ |
+| 2 | What does SLA stand for? | **none** | ✅ |
+| 3 | Which support requests are still open? | SQL | ✅ all three records exact |
+| 4 | Status of Sarah Cohen's ticket? | SQL | ✅ Billing / Medium / In Progress |
+| 5 | Send the email | **none** | ✅ one clarifying question |
+| 6 | Tickets from alice@example.com? | SQL | ✅ says not found, invents nothing |
+| 7 | Email John Smith about his login issue | SQL + Gmail | ✅ reports send failure honestly |
+
 ## If you hit a 429 mid-recording
 
-Stop. It means billing isn't active yet. Nothing is broken — wait, confirm
-billing, and start the take again. Don't try to talk over it.
+Billing is enabled, so this should not happen. If it does, stop and check
+https://aistudio.google.com/billing rather than talking over it.
