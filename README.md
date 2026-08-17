@@ -15,7 +15,7 @@ retrieval module, and a multi-agent workflow.
 | **2** | Python module — PDF/DOCX → clean text → three chunking strategies → Gemini embeddings → PostgreSQL/pgvector → semantic search | [`part2-indexing/`](./part2-indexing/README.md) |
 | **3** | Langflow multi-agent support workflow — Orchestrator + Analysis (SQL Tool) + Response (custom Gmail Tool), with dynamic routing | [`part3-langflow/`](./part3-langflow/README.md) |
 
-**Presentation link:** *(to be added)*
+**Presentation link:** https://gamma.app/docs/1q5q1taq3881164
 **Video link:** *(to be added)*
 
 ---
