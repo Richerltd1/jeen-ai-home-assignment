@@ -45,7 +45,13 @@ PATTERNS=(
   "Postgres URL with password|postgresql://[^:[:space:]]+:[^@[:space:]]+@"
   "Generic API key assignment|(api[_-]?key|apikey|secret|token)[[:space:]]*[=:][[:space:]]*[\"'][A-Za-z0-9_-]{24,}[\"']"
   "Private key block|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-  "Google app password|[a-z]{4} [a-z]{4} [a-z]{4} [a-z]{4}$"
+  # Google app passwords are 16 lowercase letters, shown by Google in four
+  # space-separated groups. Matching that shape alone is useless -- without word
+  # boundaries it also matches ordinary prose ("...bulle|ted list only when"), and
+  # even with them four short words in a row is common English. So require an
+  # assignment context: the shape only counts as a secret next to a password key.
+  "Google app password|(app_?password|APP_?PASSWORD)[[:space:]]*[=:][[:space:]]*[\"']?([a-z]{4}[[:space:]]){3}[a-z]{4}"
+  "Google app password (compact)|(app_?password|APP_?PASSWORD)[[:space:]]*[=:][[:space:]]*[\"']?[a-z]{16}[\"']?[[:space:]]*$"
 )
 
 # `mapfile` is bash 4+; macOS ships 3.2, so gather the file list with a portable
