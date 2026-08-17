@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pre-commit guard: refuse to create a commit containing a credential.
+#
+# Enable once per clone:
+#   git config core.hooksPath .githooks
+#
+# Bypass (only when you are certain it is a false positive):
+#   git commit --no-verify
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/scripts/check-secrets.sh" --staged

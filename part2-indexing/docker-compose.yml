@@ -1,0 +1,30 @@
+# Local PostgreSQL with pgvector preinstalled, so the project can be run without
+# any hosted database. Start it with:
+#
+#   docker compose up -d
+#
+# then set POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/docdex
+#
+# These credentials are local-development defaults and are intentionally not
+# secret; the real deployment reads POSTGRES_URL from .env.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: docdex-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: docdex
+    ports:
+      - "5432:5432"
+    volumes:
+      - docdex-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d docdex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  docdex-pgdata:
