@@ -374,8 +374,8 @@ def build(catalog: dict) -> dict:
         values={
             "system_prompt": ANALYSIS_PROMPT,
             "add_calculator_tool": False,
-            "add_current_date_tool": True,
-            "max_iterations": 8,
+            "add_current_date_tool": False,
+            "max_iterations": 5,
             "handle_parsing_errors": True,
         },
         tool_mode=True,
@@ -393,8 +393,8 @@ def build(catalog: dict) -> dict:
         values={
             "system_prompt": RESPONSE_PROMPT,
             "add_calculator_tool": False,
-            "add_current_date_tool": True,
-            "max_iterations": 8,
+            "add_current_date_tool": False,
+            "max_iterations": 5,
             "handle_parsing_errors": True,
         },
         tool_mode=True,
@@ -414,8 +414,8 @@ def build(catalog: dict) -> dict:
         values={
             "system_prompt": ORCHESTRATOR_PROMPT,
             "add_calculator_tool": False,
-            "add_current_date_tool": True,
-            "max_iterations": 10,
+            "add_current_date_tool": False,
+            "max_iterations": 6,
             "handle_parsing_errors": True,
         },
         display_name="Orchestrator Agent",
