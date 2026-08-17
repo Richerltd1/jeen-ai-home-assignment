@@ -54,8 +54,9 @@ logic rather than just the output.
 > database call — there's nothing here worth querying.
 
 **3.** `Which support requests are still open?`
-> Now it needs data. This routes to the Analysis Agent, which runs SQL, then to
-> the Response Agent to word the answer.
+> Now it needs data. This routes to the Analysis Agent, which runs the SQL tool.
+> Note what does NOT happen: the Response Agent stays idle. Nothing needs sending,
+> so nothing sends.
 
 *Expected: three open tickets — John Smith (Login Issue, High), Emma Johnson
 (Account Access, High), Michael Brown (Subscription, Medium).*
@@ -114,12 +115,19 @@ Show, in this order:
    FROM support_requests WHERE status ILIKE 'Open' LIMIT 50;
    ```
 
-4. **Tool Output** — the three returned rows.
+4. **Tool Output** — the three returned rows, as JSON with every column present.
+   Worth a sentence:
+   > This is a custom SQL component. Langflow's built-in one returns a pandas
+   > DataFrame rendered as text, and pandas hides middle columns behind an
+   > ellipsis — so the agent never saw email, category or priority and filled them
+   > in with plausible guesses. Returning JSON fixed that at the source.
 
-5. **The Response Agent call** — show that it receives the Analysis Agent's JSON
-   and returns prose. Say:
-   > Structured JSON between agents, plain language to the user. The JSON never
-   > reaches the customer.
+5. **Point out the absence of a Response Agent call.** Say:
+   > Two agents exist that were never invoked here. That's the design — only the
+   > components this message actually needs get activated.
+
+   Then open the trace for **message 7** (the email one) and show
+   `compose_customer_response` and `send_email` appearing only there.
 
 Then open the trace for **message 1** (the greeting):
 
