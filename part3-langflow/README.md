@@ -14,14 +14,14 @@ no tool, a data question invokes SQL, an email request invokes Gmail.
 
 ```
   SQL Database (Tool) ─────▶ Analysis Agent ────┐
-   [read-only role]          gemini-3.5-flash   │  exposed as tool:
+   [read-only, JSON]         gemini-3.1-flash-lite │ exposed as tool:
                                                 │  query_support_database
                                                 ▼
   Chat Input ───────────────────────────▶ Orchestrator Agent ───▶ Chat Output
                                                 ▲   gemini-3.6-flash
                                                 │  exposed as tool:
   Gmail Sender (Tool) ─────▶ Response Agent ────┘  compose_customer_response
-   [custom component]        gemini-flash-lite-latest
+   [custom component]        gemini-3.1-flash-lite-preview
 ```
 
 The two specialist agents are attached to the Orchestrator **as tools**, not as
@@ -236,6 +236,8 @@ owns all user-facing wording. Structured data between agents, prose to the user.
 which now returns 404 for new API keys. Model names are set explicitly.
 
 **4. Per-model free-tier quota.** Gemini's free tier allows 20 requests per day
-*per model per project*, and one chained message costs several. Each agent
-therefore runs on a different model, which triples usable headroom. For sustained
-use, billing must be enabled.
+*per model per project* (`GenerateRequestsPerDayPerProjectPerModel`), and one
+message costs several once tool loops are counted. Each agent therefore runs on a
+different model, which triples usable headroom. Pro-tier models
+(`gemini-pro-latest`, `gemini-3.1-pro-preview`) report a limit of **0/day** — they
+have no free tier at all. For any sustained use, billing must be enabled.
