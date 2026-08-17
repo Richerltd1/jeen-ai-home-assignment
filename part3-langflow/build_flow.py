@@ -62,9 +62,13 @@ EXPORT_PATH = Path(__file__).resolve().parent / EXPORT_FILENAME
 # gemini-3.7-flash is deliberately avoided: its free tier allows only ~20
 # requests per DAY, which one debugging session exhausts. These three have
 # materially larger free quotas.
+# All three verified to (a) call a tool for a data question and (b) NOT call one
+# for a greeting -- the selective-activation behaviour the whole design depends on.
+# The Orchestrator gets the strongest of the three because routing is the hardest
+# judgement; the other two mostly follow instructions.
 ORCHESTRATOR_MODEL = "gemini-3.6-flash"
-ANALYSIS_MODEL = "gemini-3.5-flash"
-RESPONSE_MODEL = "gemini-flash-lite-latest"
+ANALYSIS_MODEL = "gemini-3.1-flash-lite"
+RESPONSE_MODEL = "gemini-3.1-flash-lite-preview"
 POSTGRES_URL_VAR = "SUPPORT_DATABASE_URL"
 GEMINI_KEY_VAR = "GEMINI_API_KEY"
 GMAIL_ADDRESS_VAR = "GMAIL_ADDRESS"
@@ -339,7 +343,7 @@ def gemini_node(
 
 def build(catalog: dict) -> dict:
     agent_type, agent_def = find_component(catalog, "Agent")
-    sql_type, sql_def = find_component(catalog, "SQLComponent")
+    sql_type, sql_def = find_component(catalog, "SupportSQLComponent")
     gmail_type, gmail_def = find_component(catalog, "GmailSenderComponent")
     chat_in_type, chat_in_def = find_component(catalog, "ChatInput")
     chat_out_type, chat_out_def = find_component(catalog, "ChatOutput")
@@ -347,7 +351,7 @@ def build(catalog: dict) -> dict:
     # --- tools ------------------------------------------------------------- #
     sql_tool = make_node(
         "SQLComponent-sqltool", sql_type, sql_def, (-1750, -520),
-        values={"database_url": POSTGRES_URL_VAR, "include_columns": True, "add_error": True},
+        values={"database_url": POSTGRES_URL_VAR, "max_rows": 50},
         from_db={"database_url"},
         tool_mode=True,
         display_name="SQL Database (support_requests)",
@@ -382,6 +386,7 @@ def build(catalog: dict) -> dict:
             "add_current_date_tool": False,
             "max_iterations": 5,
             "handle_parsing_errors": True,
+            "stream": False,
         },
         tool_mode=True,
         display_name="Analysis Agent",
@@ -401,6 +406,7 @@ def build(catalog: dict) -> dict:
             "add_current_date_tool": False,
             "max_iterations": 5,
             "handle_parsing_errors": True,
+            "stream": False,
         },
         tool_mode=True,
         display_name="Response Agent",
@@ -422,6 +428,7 @@ def build(catalog: dict) -> dict:
             "add_current_date_tool": False,
             "max_iterations": 6,
             "handle_parsing_errors": True,
+            "stream": False,
         },
         display_name="Orchestrator Agent",
     )

@@ -43,7 +43,7 @@ than a hardcoded chain.
 | ------ | ------- | :------: | :------: | :-: | :---: |
 | `SMALL_TALK` | "Hi there" | — | — | — | — |
 | `GENERAL_KNOWLEDGE` | "What does SLA mean?" | — | — | — | — |
-| `DATA_LOOKUP` | "Which requests are open?" | ✅ | ✅ | ✅ | — |
+| `DATA_LOOKUP` | "Which requests are open?" | ✅ | — | ✅ | — |
 | `ACTION_REQUEST` | "Email John about his ticket" | ✅ | ✅ | ✅ | ✅ |
 | `ACTION_REQUEST` (no lookup) | "Send a test mail to x@y.com" | — | ✅ | — | ✅ |
 | `UNCLEAR` | "Send the email" | — | — | — | — |
@@ -179,9 +179,8 @@ literal GMAIL_ADDRESS  present in export: False
 pattern AIza / AQ. / sk- / postgres-URL-with-password found: False
 ```
 
-**Least privilege over concealment.** Langflow's SQL component exposes
-`database_url` as a plain-text field, so it *cannot* hold a Credential-typed
-variable. Rather than pretend the URL is hidden, the tool connects as
+**Least privilege over concealment.** The SQL component exposes `database_url`
+as a plain-text field, so it *cannot* hold a Credential-typed variable. Rather than pretend the URL is hidden, the tool connects as
 `support_readonly`, which can `SELECT` and nothing else:
 
 ```
@@ -203,6 +202,22 @@ identity.
 ## Implementation notes
 
 Four issues found by running the flow rather than trusting it:
+
+**0. The built-in SQL tool silently truncated its own results.** Langflow's
+`SQLComponent` returns a pandas DataFrame rendered as a string, and pandas elides
+middle columns when the frame is wide:
+
+```
+   id customer_name  ...       status                 created_at
+0   2   Sarah Cohen  ...  In Progress 2026-08-17 12:16:52.870069
+```
+
+`email`, `category` and `priority` are behind that `...`. The agent never receives
+them, and a model asked to report fields it cannot see invents plausible ones —
+Sarah Cohen's real Billing ticket was reported as "Technical Support" with a null
+email. No prompt can fix this; the data is gone before the model is reached.
+Replaced with a custom read-only component (`components/custom/sql_query.py`) that
+returns every column as JSON and refuses anything that is not a single SELECT.
 
 **1. Agent-as-tool name collision.** Langflow hardcodes `tool_name="Call_Agent"`
 (`lfx/components/models_and_agents/agent.py:1019`), so *every* Agent exposed as a

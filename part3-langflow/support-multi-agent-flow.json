@@ -15,57 +15,136 @@
         },
         "data": {
           "id": "SQLComponent-sqltool",
-          "type": "SQLComponent",
+          "type": "ext:custom:SupportSQLComponent@extra",
           "node": {
-            "base_classes": [
-              "Table"
-            ],
-            "beta": false,
-            "conditional_paths": [],
-            "custom_fields": {},
-            "description": "Executes SQL queries on SQLAlchemy-compatible databases.",
-            "display_name": "SQL Database (support_requests)",
-            "documentation": "https://docs.langflow.org/sql-database",
-            "edited": false,
-            "field_order": [
-              "database_url",
-              "query",
-              "include_columns",
-              "add_error"
-            ],
-            "frozen": false,
-            "icon": "database",
-            "legacy": false,
-            "metadata": {
-              "code_hash": "f26e89c1d1ca",
-              "dependencies": {
-                "dependencies": [
-                  {
-                    "name": "langchain_community",
-                    "version": "0.4.2"
-                  },
-                  {
-                    "name": "sqlalchemy",
-                    "version": "2.0.51"
-                  },
-                  {
-                    "name": "lfx",
-                    "version": null
-                  }
-                ],
-                "total_dependencies": 3
+            "template": {
+              "_type": "Component",
+              "code": {
+                "type": "code",
+                "required": true,
+                "placeholder": "",
+                "list": false,
+                "show": true,
+                "multiline": true,
+                "value": "\"\"\"Custom Langflow tool: read-only SQL over the support database, returning JSON.\n\nWhy this replaces Langflow's built-in SQL Database component:\n\nThe built-in tool executes the query correctly but returns a *pandas DataFrame\nrendered as a string*. Pandas elides middle columns when the frame is wide:\n\n       id customer_name  ...       status                 created_at\n    0   2   Sarah Cohen  ...  In Progress 2026-08-17 12:16:52.870069\n\n`email`, `category` and `priority` are behind that `...`. The agent never sees\nthem -- and an LLM asked to report fields it cannot see will invent plausible\nones. Observed in practice: Sarah Cohen's real record is Billing with a real\nemail address, and the agent reported \"Technical Support\" with a null email.\n\nThat is a data-integrity failure, not a formatting nit, and no prompt can fix it\nbecause the information is gone before the model is reached. This component\nreturns every column as JSON, so what the agent sees is exactly what the\ndatabase returned.\n\nSafety: the tool refuses anything that is not a single SELECT. That is defence in\ndepth -- the connection should also use a read-only role (see README) -- but it\nmeans a prompt-injected DROP fails here as well as at the grant.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nimport re\nfrom decimal import Decimal\n\nfrom langflow.custom import Component\nfrom langflow.io import IntInput, MessageTextInput, Output, SecretStrInput\nfrom langflow.schema import Data\n\n# One leading SELECT (or WITH ... SELECT), and no statement separator that would\n# allow a second statement to be smuggled in.\n_SELECT_ONLY = re.compile(r\"^\\s*(select|with)\\b\", re.IGNORECASE)\n_FORBIDDEN = re.compile(\n    r\"\\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do)\\b\",\n    re.IGNORECASE,\n)\n\nDEFAULT_MAX_ROWS = 50\n\n\nclass SupportSQLComponent(Component):\n    display_name = \"SQL Database (read-only, JSON)\"\n    description = (\n        \"Run a read-only SQL SELECT against the support database and return the \"\n        \"rows as JSON. Use for any question about support requests, tickets, \"\n        \"customers, statuses, priorities, categories or counts.\"\n    )\n    icon = \"database\"\n    name = \"SupportSQL\"\n\n    inputs = [\n        MessageTextInput(\n            name=\"query\",\n            display_name=\"SQL query\",\n            info=(\n                \"A single PostgreSQL SELECT statement. Table: support_requests\"\n                \"(id, customer_name, email, category, priority, status, created_at). \"\n                \"Use ILIKE for name/email matching. Always add LIMIT.\"\n            ),\n            tool_mode=True,\n            required=True,\n        ),\n        MessageTextInput(\n            name=\"database_url\",\n            display_name=\"Database URL\",\n            info=\"PostgreSQL connection string. Bind to a Global Variable.\",\n            required=True,\n        ),\n        SecretStrInput(\n            name=\"database_password\",\n            display_name=\"Database password (optional)\",\n            info=\"Only if the URL does not already carry credentials.\",\n            required=False,\n        ),\n        IntInput(\n            name=\"max_rows\",\n            display_name=\"Max rows\",\n            value=DEFAULT_MAX_ROWS,\n            info=\"Hard cap on rows returned, applied after the query runs.\",\n        ),\n    ]\n\n    outputs = [Output(display_name=\"Rows (JSON)\", name=\"rows\", method=\"run_query\")]\n\n    def run_query(self) -> Data:\n        \"\"\"Execute the query and return every column as JSON.\n\n        Never raises: the Analysis Agent is prompted to report tool failures, so\n        errors come back as structured data it can read and relay.\n        \"\"\"\n        query = (self.query or \"\").strip().rstrip(\";\").strip()\n        url = (self.database_url or \"\").strip()\n        limit = int(self.max_rows or DEFAULT_MAX_ROWS)\n\n        if not query:\n            return self._error(\"No SQL query was provided.\")\n        if not url:\n            return self._error(\n                \"No database URL is configured on the SQL tool. Set the \"\n                \"SUPPORT_DATABASE_URL global variable.\"\n            )\n\n        # --- read-only enforcement ------------------------------------------\n        if not _SELECT_ONLY.match(query):\n            return self._error(\n                \"Only SELECT queries are permitted. This tool is read-only.\"\n            )\n        if \";\" in query:\n            return self._error(\n                \"Multiple statements are not permitted. Send a single SELECT.\"\n            )\n        forbidden = _FORBIDDEN.search(query)\n        if forbidden:\n            return self._error(\n                f\"The keyword '{forbidden.group(0).upper()}' is not permitted. \"\n                \"This tool is read-only.\"\n            )\n\n        # --- execute ---------------------------------------------------------\n        try:\n            from sqlalchemy import create_engine, text\n        except ImportError:  # pragma: no cover\n            return self._error(\"SQLAlchemy is not installed in this environment.\")\n\n        try:\n            engine = create_engine(url, connect_args={\"connect_timeout\": 10})\n            with engine.connect() as connection:\n                result = connection.execute(text(query))\n                columns = list(result.keys())\n                rows = [dict(zip(columns, row)) for row in result.fetchmany(limit)]\n        except Exception as exc:  # noqa: BLE001 - many driver error types\n            return self._error(f\"SQL execution failed: {self._safe(exc)}\")\n\n        payload = {\n            \"row_count\": len(rows),\n            \"columns\": columns,\n            \"rows\": json.loads(json.dumps(rows, default=self._encode)),\n        }\n        self.status = f\"{len(rows)} row(s)\"\n        return Data(data=payload)\n\n    def _error(self, message: str) -> Data:\n        self.status = f\"Error: {message}\"\n        return Data(data={\"error\": message, \"row_count\": 0, \"rows\": []})\n\n    @staticmethod\n    def _encode(value):\n        \"\"\"JSON-encode types psycopg returns that json does not handle.\"\"\"\n        if isinstance(value, Decimal):\n            return float(value)\n        return str(value)\n\n    @staticmethod\n    def _safe(exc: Exception) -> str:\n        \"\"\"Render an error without leaking the connection string.\"\"\"\n        message = str(exc).strip() or exc.__class__.__name__\n        if \"://\" in message:\n            return f\"{exc.__class__.__name__} (details withheld: may contain credentials)\"\n        return message[:300]\n",
+                "fileTypes": [],
+                "file_path": "",
+                "password": false,
+                "name": "code",
+                "advanced": true,
+                "api_editable": false,
+                "dynamic": true,
+                "info": "",
+                "load_from_db": false,
+                "title_case": false
               },
-              "keywords": [
-                "sql",
-                "database",
-                "query",
-                "db",
-                "fetch"
-              ],
-              "module": "lfx.components.data_source.sql_executor.SQLComponent"
+              "database_password": {
+                "load_from_db": true,
+                "override_skip": false,
+                "required": false,
+                "placeholder": "",
+                "show": true,
+                "name": "database_password",
+                "value": "",
+                "display_name": "Database password (optional)",
+                "advanced": false,
+                "api_editable": false,
+                "input_types": [],
+                "dynamic": false,
+                "info": "Only if the URL does not already carry credentials.",
+                "title_case": false,
+                "track_in_telemetry": false,
+                "password": true,
+                "type": "str",
+                "_input_type": "SecretStrInput"
+              },
+              "database_url": {
+                "tool_mode": false,
+                "trace_as_input": true,
+                "trace_as_metadata": true,
+                "load_from_db": true,
+                "list": false,
+                "list_add_label": "Add More",
+                "override_skip": false,
+                "required": true,
+                "placeholder": "",
+                "show": true,
+                "name": "database_url",
+                "value": "SUPPORT_DATABASE_URL",
+                "display_name": "Database URL",
+                "advanced": false,
+                "api_editable": false,
+                "input_types": [
+                  "Message"
+                ],
+                "dynamic": false,
+                "info": "PostgreSQL connection string. Bind to a Global Variable.",
+                "title_case": false,
+                "track_in_telemetry": false,
+                "type": "str",
+                "_input_type": "MessageTextInput"
+              },
+              "max_rows": {
+                "tool_mode": false,
+                "trace_as_metadata": true,
+                "list": false,
+                "list_add_label": "Add More",
+                "override_skip": false,
+                "required": false,
+                "placeholder": "",
+                "show": true,
+                "name": "max_rows",
+                "value": 50,
+                "display_name": "Max rows",
+                "advanced": false,
+                "api_editable": false,
+                "dynamic": false,
+                "info": "Hard cap on rows returned, applied after the query runs.",
+                "title_case": false,
+                "track_in_telemetry": true,
+                "type": "int",
+                "_input_type": "IntInput"
+              },
+              "query": {
+                "tool_mode": true,
+                "trace_as_input": true,
+                "trace_as_metadata": true,
+                "load_from_db": false,
+                "list": false,
+                "list_add_label": "Add More",
+                "override_skip": false,
+                "required": true,
+                "placeholder": "",
+                "show": true,
+                "name": "query",
+                "value": "",
+                "display_name": "SQL query",
+                "advanced": false,
+                "api_editable": false,
+                "input_types": [
+                  "Message"
+                ],
+                "dynamic": false,
+                "info": "A single PostgreSQL SELECT statement. Table: support_requests(id, customer_name, email, category, priority, status, created_at). Use ILIKE for name/email matching. Always add LIMIT.",
+                "title_case": false,
+                "track_in_telemetry": false,
+                "type": "str",
+                "_input_type": "MessageTextInput"
+              }
             },
+            "description": "Run a read-only SQL SELECT against the support database and return the rows as JSON. Use for any question about support requests, tickets, customers, statuses, priorities, categories or counts.",
+            "icon": "database",
+            "base_classes": [
+              "JSON"
+            ],
+            "display_name": "SQL Database (support_requests)",
+            "documentation": "",
             "minimized": false,
+            "custom_fields": {},
             "output_types": [],
+            "pinned": false,
+            "conditional_paths": [],
+            "frozen": false,
             "outputs": [
               {
                 "name": "component_as_tool",
@@ -81,128 +160,38 @@
                 "allows_loop": false
               }
             ],
-            "pinned": false,
-            "template": {
-              "_type": "Component",
-              "add_error": {
-                "_input_type": "BoolInput",
-                "advanced": true,
-                "api_editable": false,
-                "display_name": "Add Error",
-                "dynamic": false,
-                "info": "If True, the error will be added to the result",
-                "list": false,
-                "list_add_label": "Add More",
-                "name": "add_error",
-                "override_skip": false,
-                "placeholder": "",
-                "required": false,
-                "show": true,
-                "title_case": false,
-                "tool_mode": true,
-                "trace_as_metadata": true,
-                "track_in_telemetry": true,
-                "type": "bool",
-                "value": true
-              },
-              "code": {
-                "advanced": true,
-                "api_editable": false,
-                "dynamic": true,
-                "fileTypes": [],
-                "file_path": "",
-                "info": "",
-                "list": false,
-                "load_from_db": false,
-                "multiline": true,
-                "name": "code",
-                "password": false,
-                "placeholder": "",
-                "required": true,
-                "show": true,
-                "title_case": false,
-                "type": "code",
-                "value": "from typing import TYPE_CHECKING, Any\n\nfrom langchain_community.utilities import SQLDatabase\nfrom sqlalchemy.exc import SQLAlchemyError\n\nfrom lfx.custom.custom_component.component_with_cache import ComponentWithCache\nfrom lfx.io import BoolInput, MessageTextInput, MultilineInput, Output\nfrom lfx.schema.dataframe import DataFrame\nfrom lfx.schema.message import Message\nfrom lfx.services.cache.utils import CacheMiss\nfrom lfx.utils.ssrf_protection import validate_connector_database_url_for_ssrf\n\nif TYPE_CHECKING:\n    from sqlalchemy.engine import Result\n\nSQL_DATABASE_ENGINE_ARGS = {\"pool_pre_ping\": True}\n\n\nclass SQLComponent(ComponentWithCache):\n    \"\"\"A sql component.\"\"\"\n\n    display_name = \"SQL Database\"\n    description = \"Executes SQL queries on SQLAlchemy-compatible databases.\"\n    documentation: str = \"https://docs.langflow.org/sql-database\"\n    icon = \"database\"\n    name = \"SQLComponent\"\n    metadata = {\"keywords\": [\"sql\", \"database\", \"query\", \"db\", \"fetch\"]}\n\n    def __init__(self, **kwargs) -> None:\n        super().__init__(**kwargs)\n        self.db: SQLDatabase = None\n\n    def maybe_create_db(self):\n        if self.database_url != \"\":\n            # Security: a tenant fully controls database_url. Block SSRF to internal\n            # databases/services and local-file dialects (sqlite/duckdb -> arbitrary\n            # server file read/write) before opening the connection.\n            validate_connector_database_url_for_ssrf(self.database_url)\n            if self._shared_component_cache:\n                cached_db = self._shared_component_cache.get(self.database_url)\n                if not isinstance(cached_db, CacheMiss):\n                    self.db = cached_db\n                    return\n                self.log(\"Connecting to database\")\n            try:\n                self.db = SQLDatabase.from_uri(self.database_url, engine_args=SQL_DATABASE_ENGINE_ARGS)\n            except Exception as e:\n                msg = f\"An error occurred while connecting to the database: {e}\"\n                raise ValueError(msg) from e\n            if self._shared_component_cache:\n                self._shared_component_cache.set(self.database_url, self.db)\n\n    inputs = [\n        MessageTextInput(name=\"database_url\", display_name=\"Database URL\", required=True),\n        MultilineInput(name=\"query\", display_name=\"SQL Query\", tool_mode=True, required=True),\n        BoolInput(name=\"include_columns\", display_name=\"Include Columns\", value=True, tool_mode=True, advanced=True),\n        BoolInput(\n            name=\"add_error\",\n            display_name=\"Add Error\",\n            value=False,\n            tool_mode=True,\n            info=\"If True, the error will be added to the result\",\n            advanced=True,\n        ),\n    ]\n\n    outputs = [\n        Output(display_name=\"Result Table\", name=\"run_sql_query\", method=\"run_sql_query\"),\n    ]\n\n    def build_component(\n        self,\n    ) -> Message:\n        error = None\n        self.maybe_create_db()\n        try:\n            result = self.db.run(self.query, include_columns=self.include_columns)\n            self.status = result\n        except SQLAlchemyError as e:\n            msg = f\"An error occurred while running the SQL Query: {e}\"\n            self.log(msg)\n            result = str(e)\n            self.status = result\n            error = repr(e)\n\n        if self.add_error and error is not None:\n            result = f\"{result}\\n\\nError: {error}\\n\\nQuery: {self.query}\"\n        elif error is not None:\n            # Then we won't add the error to the result\n            result = self.query\n\n        return Message(text=result)\n\n    def __execute_query(self) -> list[dict[str, Any]]:\n        self.maybe_create_db()\n        try:\n            cursor: Result[Any] = self.db.run(self.query, fetch=\"cursor\")\n            return [x._asdict() for x in cursor.fetchall()]\n        except SQLAlchemyError as e:\n            msg = f\"An error occurred while running the SQL Query: {e}\"\n            self.log(msg)\n            raise ValueError(msg) from e\n\n    def run_sql_query(self) -> DataFrame:\n        result = self.__execute_query()\n        df_result = DataFrame(result)\n        self.status = df_result\n        return df_result\n"
-              },
-              "database_url": {
-                "_input_type": "MessageTextInput",
-                "advanced": false,
-                "api_editable": false,
-                "display_name": "Database URL",
-                "dynamic": false,
-                "info": "",
-                "input_types": [
-                  "Message"
-                ],
-                "list": false,
-                "list_add_label": "Add More",
-                "load_from_db": true,
-                "name": "database_url",
-                "override_skip": false,
-                "placeholder": "",
-                "required": true,
-                "show": true,
-                "title_case": false,
-                "tool_mode": false,
-                "trace_as_input": true,
-                "trace_as_metadata": true,
-                "track_in_telemetry": false,
-                "type": "str",
-                "value": "SUPPORT_DATABASE_URL"
-              },
-              "include_columns": {
-                "_input_type": "BoolInput",
-                "advanced": true,
-                "api_editable": false,
-                "display_name": "Include Columns",
-                "dynamic": false,
-                "info": "",
-                "list": false,
-                "list_add_label": "Add More",
-                "name": "include_columns",
-                "override_skip": false,
-                "placeholder": "",
-                "required": false,
-                "show": true,
-                "title_case": false,
-                "tool_mode": true,
-                "trace_as_metadata": true,
-                "track_in_telemetry": true,
-                "type": "bool",
-                "value": true
-              },
-              "query": {
-                "_input_type": "MultilineInput",
-                "advanced": false,
-                "ai_enabled": false,
-                "api_editable": false,
-                "copy_field": false,
-                "display_name": "SQL Query",
-                "dynamic": false,
-                "info": "",
-                "input_types": [
-                  "Message"
-                ],
-                "list": false,
-                "list_add_label": "Add More",
-                "load_from_db": false,
-                "multiline": true,
-                "name": "query",
-                "override_skip": false,
-                "password": false,
-                "placeholder": "",
-                "required": true,
-                "show": true,
-                "title_case": false,
-                "tool_mode": true,
-                "trace_as_input": true,
-                "trace_as_metadata": true,
-                "track_in_telemetry": false,
-                "type": "str",
-                "value": ""
+            "field_order": [
+              "query",
+              "database_url",
+              "database_password",
+              "max_rows"
+            ],
+            "beta": false,
+            "legacy": false,
+            "edited": false,
+            "metadata": {
+              "module": "_lfx_ext.extra.custom.sql_query",
+              "code_hash": "5df7db476f3e",
+              "dependencies": {
+                "total_dependencies": 2,
+                "dependencies": [
+                  {
+                    "name": "langflow",
+                    "version": "1.11.3"
+                  },
+                  {
+                    "name": "sqlalchemy",
+                    "version": "2.0.52"
+                  }
+                ]
               }
             },
-            "tool_mode": true
+            "tool_mode": true,
+            "extension": "custom",
+            "bundle": "custom",
+            "extension_version": "0.0.0",
+            "namespaced_id": "ext:custom:SupportSQLComponent@extra",
+            "name": "SupportSQL"
           }
         }
       },
@@ -554,7 +543,7 @@
                 "placeholder": "",
                 "show": true,
                 "name": "model_name",
-                "value": "gemini-3.5-flash",
+                "value": "gemini-3.1-flash-lite",
                 "display_name": "Model",
                 "advanced": false,
                 "api_editable": false,
@@ -740,7 +729,7 @@
               "LanguageModel",
               "Message"
             ],
-            "display_name": "Gemini Analysis (gemini-3.5-flash)",
+            "display_name": "Gemini Analysis (gemini-3.1-flash-lite)",
             "documentation": "",
             "minimized": false,
             "custom_fields": {},
@@ -969,7 +958,7 @@
                 "placeholder": "",
                 "show": true,
                 "name": "model_name",
-                "value": "gemini-flash-lite-latest",
+                "value": "gemini-3.1-flash-lite-preview",
                 "display_name": "Model",
                 "advanced": false,
                 "api_editable": false,
@@ -1155,7 +1144,7 @@
               "LanguageModel",
               "Message"
             ],
-            "display_name": "Gemini Response (gemini-flash-lite-latest)",
+            "display_name": "Gemini Response (gemini-3.1-flash-lite-preview)",
             "documentation": "",
             "minimized": false,
             "custom_fields": {},
@@ -2202,7 +2191,7 @@
                 "trace_as_metadata": true,
                 "track_in_telemetry": true,
                 "type": "bool",
-                "value": true
+                "value": false
               },
               "system_prompt": {
                 "_input_type": "MultilineInput",
@@ -2232,7 +2221,7 @@
                 "trace_as_metadata": true,
                 "track_in_telemetry": false,
                 "type": "str",
-                "value": "You are the Analysis Agent. You are the ONLY agent with database access. You do\nnot talk to the end user -- you return a structured analysis to the Orchestrator.\n\n## Database\n\nOne table, `support_requests`:\n\n| column        | type         | notes                                              |\n| ------------- | ------------ | -------------------------------------------------- |\n| id            | SERIAL       | primary key                                         |\n| customer_name | VARCHAR(100) | e.g. 'John Smith'                                   |\n| email         | VARCHAR(255) | e.g. 'john@example.com'                             |\n| category      | VARCHAR(100) | 'Login Issue', 'Billing', 'Technical Support', 'Account Access', 'Subscription' |\n| priority      | VARCHAR(50)  | 'High', 'Medium', 'Low'                             |\n| status        | VARCHAR(50)  | 'Open', 'In Progress', 'Closed'                     |\n| created_at    | TIMESTAMP    | defaults to insert time                             |\n\n## How to query\n\n- Write standard PostgreSQL. Use ILIKE for name and email matching, because user\n  input will not match stored capitalisation.\n- SELECT only. Never INSERT, UPDATE, DELETE, DROP or ALTER -- this tool is\n  read-only by policy, and a write attempt is a serious error.\n- Always select the columns you actually need rather than `SELECT *`, and add\n  `LIMIT 50` to any query that could return the whole table.\n- Query ONCE where possible. If your first query returns nothing, try at most one\n  broader variation (for example matching on first name only) before concluding\n  the record does not exist.\n\n## What to produce\n\nReturn a SINGLE-LINE JSON object and nothing else. No markdown, no bullet points,\nno code fences, no commentary before or after. You are talking to another program,\nnot to a person -- prose here would be pasted to a customer verbatim, which is a bug.\n\nShape:\n\n{\"found\":bool,\"records\":[...],\"classification\":str,\"urgency\":str,\"missing_information\":str|null,\"recommended_action\":str}\n\nField meanings:\n\n- **found**: true or false -- did the database actually contain matching records?\n- **records**: the rows retrieved, or an empty list. Never invent a row.\n- **classification**: which category the request falls under.\n- **urgency**: Critical / High / Medium / Low. Derive it, do not copy it blindly:\n  - Critical -- reported data loss, security breach, or a full outage.\n  - High -- customer is blocked from using the product (Login Issue, Account\n    Access, or any suspended account), or the stored priority is 'High'.\n  - Medium -- billing and subscription matters that do not block access.\n  - Low -- questions, feedback, and anything already 'Closed'.\n- **missing_information**: anything you needed but the user did not supply, for\n  example a customer identifier when several customers match.\n- **recommended_action**: what the Response Agent should do next, stated\n  concretely (for example \"email john@example.com confirming ticket 1 is Open and\n  assigned to the identity team\").\n\n## Error handling\n\n- If the SQL tool returns an error, report the failure and the query you\n  attempted. Do not retry the identical query.\n- If the query succeeds but returns zero rows, that is NOT an error. Set\n  found=false and say plainly that no matching record exists. Never fill the gap\n  with a plausible-looking invented record.\n- If the user's request is too vague to query at all, set found=false and put the\n  specific missing detail in missing_information instead of guessing.\n"
+                "value": "You are the Analysis Agent. You are the ONLY agent with database access. You do\nnot talk to the end user -- you return a short factual briefing to the Orchestrator.\n\n## Database\n\nOne table, `support_requests`:\n\n| column        | type         | notes                                              |\n| ------------- | ------------ | -------------------------------------------------- |\n| id            | SERIAL       | primary key                                         |\n| customer_name | VARCHAR(100) | e.g. 'John Smith'                                   |\n| email         | VARCHAR(255) | e.g. 'john@example.com'                             |\n| category      | VARCHAR(100) | 'Login Issue', 'Billing', 'Technical Support', 'Account Access', 'Subscription' |\n| priority      | VARCHAR(50)  | 'High', 'Medium', 'Low'                             |\n| status        | VARCHAR(50)  | 'Open', 'In Progress', 'Closed'                     |\n| created_at    | TIMESTAMP    | defaults to insert time                             |\n\n## How to query\n\n- Write standard PostgreSQL. Use ILIKE for name and email matching, because user\n  input will not match stored capitalisation.\n- SELECT only. Never INSERT, UPDATE, DELETE, DROP or ALTER -- this tool is\n  read-only by policy, and a write attempt is a serious error.\n- Always select the columns you actually need rather than `SELECT *`, and add\n  `LIMIT 50` to any query that could return the whole table.\n- Query ONCE where possible. If your first query returns nothing, try at most one\n  broader variation (for example matching on first name only) before concluding\n  the record does not exist.\n\n## What to produce\n\nReturn a SHORT factual briefing in plain sentences. No JSON, no code fences, no\nfield names, no markdown headers.\n\nLangflow surfaces your output inside the final reply, so anything you write may\nreach the customer. Write it so that if it does, it still reads as sensible\nEnglish rather than as a leaked data structure.\n\nYour text is shown to the customer as-is, so write it as the finished answer.\nTwo to four sentences. No field names, no `ACTION:` line, no JSON, no SQL.\n\nExample:\n    Sarah Cohen's ticket (#2) is a Billing request at Medium priority, and it is\n    currently In Progress. It is on her account under sarah@example.com.\n\nExample when nothing is found:\n    I could not find any support request for alice@example.com. If you have an\n    order number or ticket ID I can look again with that.\n\nWork these out internally, and let them shape the wording -- but do not print\nthem as labelled fields:\n\n- **found**: true or false -- did the database actually contain matching records?\n- **records**: the rows retrieved, or an empty list. Never invent a row.\n- **classification**: which category the request falls under.\n- **urgency**: Critical / High / Medium / Low. Derive it, do not copy it blindly:\n  - Critical -- reported data loss, security breach, or a full outage.\n  - High -- customer is blocked from using the product (Login Issue, Account\n    Access, or any suspended account), or the stored priority is 'High'.\n  - Medium -- billing and subscription matters that do not block access.\n  - Low -- questions, feedback, and anything already 'Closed'.\n- **missing_information**: anything you needed but the user did not supply, for\n  example a customer identifier when several customers match.\n- **recommended_action**: what the Response Agent should do next, stated\n  concretely (for example \"email john@example.com confirming ticket 1 is Open and\n  assigned to the identity team\").\n\n## Error handling\n\n- If the SQL tool returns an error, report the failure and the query you\n  attempted. Do not retry the identical query.\n- If the query succeeds but returns zero rows, that is NOT an error. Set\n  found=false and say plainly that no matching record exists. Never fill the gap\n  with a plausible-looking invented record.\n- If the user's request is too vague to query at all, set found=false and put the\n  specific missing detail in missing_information instead of guessing.\n"
               },
               "tools": {
                 "_input_type": "HandleInput",
@@ -2852,7 +2841,7 @@
                 "trace_as_metadata": true,
                 "track_in_telemetry": true,
                 "type": "bool",
-                "value": true
+                "value": false
               },
               "system_prompt": {
                 "_input_type": "MultilineInput",
@@ -2882,7 +2871,7 @@
                 "trace_as_metadata": true,
                 "track_in_telemetry": false,
                 "type": "str",
-                "value": "You are the Response Agent. You turn the Analysis Agent's findings into what the\nuser actually receives, and you are the only agent that can send email.\n\n## Your input\n\nYou usually receive a JSON object produced by the Analysis Agent, shaped like\n`{\"found\":bool,\"records\":[...],\"classification\":...,\"urgency\":...,\n\"missing_information\":...,\"recommended_action\":...}`, together with the user's\noriginal question.\n\nThat JSON is internal. **Never echo it, quote it, or reproduce its field names.**\nYour entire job is turning it into something a customer would want to read.\n\n## Your job\n\n1. Summarise the collected information in plain language. No SQL, no column\n   names, no JSON, no internal jargon. Prose or a short list.\n   For example, three open records become: \"There are three open requests: John\n   Smith (Login Issue, High), Emma Johnson (Account Access, High) and Michael\n   Brown (Subscription, Medium).\"\n2. Send an email through the Gmail tool ONLY when the user explicitly asked for\n   one, or the Analysis Agent's recommended_action explicitly calls for one.\n3. Report the result of every action you took, including failures.\n4. State the concrete next step.\n\n## Sending email -- rules\n\n- Never send to an address you were not given. If the recipient is missing, do\n  not guess it from the customer name; say the address is missing and stop.\n- Subject lines are specific: \"Update on your Login Issue (ticket #1)\", never\n  \"Support Update\".\n- The body must state: what the current status is, what happens next, and who is\n  responsible. Keep it under 120 words.\n- Send at most ONE email per user request. If you have already sent one in this\n  turn, do not send another.\n- After sending, confirm the actual recipient address back to the user so a\n  mistake is visible immediately.\n\n## Error handling\n\n- If the Gmail tool fails, say so explicitly: state that the email was NOT sent,\n  give the reason, and offer to retry. Never report success for a send that\n  failed or that you did not attempt.\n- If the Analysis Agent reported found=false, do not invent details to fill the\n  response. Tell the user no record was found and ask for the specific detail\n  needed to locate it.\n- If asked to act on data you were never given, say what is missing rather than\n  proceeding on an assumption.\n\n## Output\n\nReply in the user's language. Structure:\n- One or two sentences summarising the situation.\n- What action was taken, if any, and its result.\n- The next step, and who owns it.\n\nBe direct. No filler openings, no apologising, no \"I hope this helps\".\n"
+                "value": "You are the Response Agent. You turn the Analysis Agent's findings into what the\nuser actually receives, and you are the only agent that can send email.\n\n## Your input\n\nYou usually receive a JSON object produced by the Analysis Agent, shaped like\n`{\"found\":bool,\"records\":[...],\"classification\":...,\"urgency\":...,\n\"missing_information\":...,\"recommended_action\":...}`, together with the user's\noriginal question.\n\nThat JSON is internal. **Never echo it, quote it, or reproduce its field names.**\nYour entire job is turning it into something a customer would want to read.\n\n## Your job\n\n1. Summarise the collected information in plain language. No SQL, no column\n   names, no JSON, no internal jargon. Prose or a short list.\n   For example, three open records become: \"There are three open requests: John\n   Smith (Login Issue, High), Emma Johnson (Account Access, High) and Michael\n   Brown (Subscription, Medium).\"\n2. Send an email through the Gmail tool ONLY if your input contains the exact\n   line `SEND_EMAIL: yes`. If it says `SEND_EMAIL: no`, or says nothing at all,\n   you MUST NOT call the Gmail tool -- not even to be helpful. Answering a\n   question is not a reason to email anybody.\n3. Report the result of every action you took, including failures.\n4. State the concrete next step.\n\n## Sending email -- rules\n\n- Never send to an address you were not given. If the recipient is missing, do\n  not guess it from the customer name; say the address is missing and stop.\n- Subject lines are specific: \"Update on your Login Issue (ticket #1)\", never\n  \"Support Update\".\n- The body must state: what the current status is, what happens next, and who is\n  responsible. Keep it under 120 words.\n- Send at most ONE email per user request. If you have already sent one in this\n  turn, do not send another.\n- After sending, confirm the actual recipient address back to the user so a\n  mistake is visible immediately.\n\n## Error handling\n\n- If the Gmail tool fails, say so explicitly: state that the email was NOT sent,\n  give the reason, and offer to retry. Never report success for a send that\n  failed or that you did not attempt.\n- If the Analysis Agent reported found=false, do not invent details to fill the\n  response. Tell the user no record was found and ask for the specific detail\n  needed to locate it.\n- If asked to act on data you were never given, say what is missing rather than\n  proceeding on an assumption.\n\n## Output\n\nReply in the user's language. Structure:\n- One or two sentences summarising the situation.\n- What action was taken, if any, and its result.\n- The next step, and who owns it.\n\nBe direct. No filler openings, no apologising, no \"I hope this helps\".\n"
               },
               "tools": {
                 "_input_type": "HandleInput",
@@ -3518,7 +3507,7 @@
                 "trace_as_metadata": true,
                 "track_in_telemetry": true,
                 "type": "bool",
-                "value": true
+                "value": false
               },
               "system_prompt": {
                 "_input_type": "MultilineInput",
@@ -3548,7 +3537,7 @@
                 "trace_as_metadata": true,
                 "track_in_telemetry": false,
                 "type": "str",
-                "value": "You are the Orchestrator Agent of a customer support system. You are the only\nagent that talks to the user directly, and you decide how much of the system to\nactivate for each message.\n\n## Your job\n\nClassify the user's intent, then take the CHEAPEST action that fully answers it.\nActivating more of the system than a message needs is a failure, not thoroughness.\n\n## Routing rules -- follow these exactly\n\nClassify every incoming message into exactly one of these intents:\n\n1. **SMALL_TALK** -- greetings, thanks, goodbyes, \"how are you\", meta-questions\n   about what you can do.\n   ACTION: Answer directly in one or two sentences. Do NOT call any tool. Do NOT\n   delegate to another agent. Do NOT invent ticket data.\n\n2. **DATA_LOOKUP** -- the user asks about support requests, tickets, customers,\n   statuses, priorities, categories, counts, or anything that requires reading\n   the support database.\n   ACTION: Two steps, in order.\n   a. Call `query_support_database` with the user's question verbatim plus any\n      customer name or email mentioned earlier in the conversation. It returns a\n      JSON object -- machine output, never shown to the user.\n   b. Call `compose_customer_response`, passing that JSON and the user's original\n      question. It writes the customer-facing wording. Return what it gives you.\n\n   Do not answer a DATA_LOOKUP from the JSON yourself, and never emit the JSON.\n\n3. **ACTION_REQUEST** -- the user asks you to DO something: send an email, notify\n   someone, escalate, follow up.\n   ACTION: If the request needs facts from the database first (for example\n   \"email John about his ticket\"), delegate to the Analysis Agent, then to the\n   Response Agent. If it needs no facts (for example \"send a test email to\n   x@y.com saying hello\"), delegate straight to the Response Agent.\n\n4. **GENERAL_KNOWLEDGE** -- a question you can answer from your own knowledge that\n   does not concern this company's data (for example \"what does SLA mean?\").\n   ACTION: Answer directly. Do NOT call tools.\n\n5. **UNCLEAR** -- you cannot confidently place the message in one of the above,\n   or it is missing something essential (for example \"send the email\" with no\n   recipient and no prior context).\n   ACTION: Ask ONE specific clarifying question. Never guess a recipient address,\n   a customer identity, or a ticket id.\n\n## Hard rules\n\n- Never call the SQL tool yourself. Data retrieval belongs to the Analysis Agent.\n- Never call the Gmail tool yourself. Sending belongs to the Response Agent.\n- Never fabricate ticket ids, customer names, email addresses, or statuses. If a\n  fact did not come back from a tool, you do not have it.\n- Carry context forward. If the user said \"John Smith\" three messages ago and now\n  says \"send him an email\", the subject is still John Smith.\n- If a downstream agent reports an error, tell the user plainly what failed and\n  what you need in order to retry. Do not silently retry more than once.\n\n## Output\n\nReply in the user's language. Be concise and concrete. When an action was taken,\nstate what happened and what the next step is.\n\n**Never show the user an agent's internal output verbatim.** The Analysis Agent\nreturns a structured report with fields like `found`, `records`,\n`classification`, `urgency` and `recommended_action`. That format is for you, not\nfor the customer. Read it, then write a short human answer in prose or a simple\nlist. A reply containing the words \"found:\", \"records:\" or \"recommended_action:\"\nis a bug.\n\nGood: \"There are three open requests: John Smith (Login Issue, High), Emma\nJohnson (Account Access, High) and Michael Brown (Subscription, Medium). The two\nHigh ones block product usage, so they should be picked up first.\"\n\nBad: pasting the structured report.\n\nDo not repeat yourself. Produce ONE answer, not one per agent you consulted.\n"
+                "value": "You are the Orchestrator Agent of a customer support system. You are the only\nagent that talks to the user directly, and you decide how much of the system to\nactivate for each message.\n\n## Your job\n\nClassify the user's intent, then take the CHEAPEST action that fully answers it.\nActivating more of the system than a message needs is a failure, not thoroughness.\n\n## Routing rules -- follow these exactly\n\nClassify every incoming message into exactly one of these intents:\n\n1. **SMALL_TALK** -- greetings, thanks, goodbyes, \"how are you\", meta-questions\n   about what you can do.\n   ACTION: Answer directly in one or two sentences. Do NOT call any tool. Do NOT\n   delegate to another agent. Do NOT invent ticket data.\n\n2. **DATA_LOOKUP** -- the user asks about support requests, tickets, customers,\n   statuses, priorities, categories, counts, or anything that requires reading\n   the support database.\n   ACTION: Call `query_support_database` ONCE, with the user's question verbatim\n   plus any customer name or email mentioned earlier in the conversation. It\n   returns a customer-ready answer. Return that answer as your reply, unchanged.\n\n   Do NOT call `compose_customer_response` for a plain question. Nothing needs\n   composing and nothing needs sending -- invoking it only duplicates the answer.\n   The Response Agent exists for actions, not for questions.\n\n3. **ACTION_REQUEST** -- the user asks you to DO something: send an email, notify\n   someone, escalate, follow up.\n   ACTION: If the request needs facts from the database first (for example\n   \"email John about his ticket\"), call `query_support_database`, then\n   `compose_customer_response`. If it needs no facts (for example \"send a test\n   email to x@y.com saying hello\"), call `compose_customer_response` directly.\n\n   In BOTH cases include a line reading exactly `SEND_EMAIL: yes` plus the\n   recipient address in what you pass to the Response Agent.\n\n4. **GENERAL_KNOWLEDGE** -- a question you can answer from your own knowledge that\n   does not concern this company's data (for example \"what does SLA mean?\").\n   ACTION: Answer directly. Do NOT call tools.\n\n5. **UNCLEAR** -- you cannot confidently place the message in one of the above,\n   or it is missing something essential (for example \"send the email\" with no\n   recipient and no prior context).\n   ACTION: Ask ONE specific clarifying question. Never guess a recipient address,\n   a customer identity, or a ticket id.\n\n## Hard rules\n\n- Never call the SQL tool yourself. Data retrieval belongs to the Analysis Agent.\n- Never call the Gmail tool yourself. Sending belongs to the Response Agent.\n- Never fabricate ticket ids, customer names, email addresses, or statuses. If a\n  fact did not come back from a tool, you do not have it.\n- Carry context forward. If the user said \"John Smith\" three messages ago and now\n  says \"send him an email\", the subject is still John Smith.\n- If a downstream agent reports an error, tell the user plainly what failed and\n  what you need in order to retry. Do not silently retry more than once.\n\n## Output\n\nReply in the user's language. Be concise and concrete. When an action was taken,\nstate what happened and what the next step is.\n\n**Say each thing once.** The Response Agent has already written the customer-facing\nwording by the time you get it. Return it as your answer -- do not restate the\nAnalysis Agent's briefing, do not summarise it again in your own words, and do not\nappend your own version underneath. Two paragraphs saying the same thing is the\nfailure mode here.\n\nGood: \"There are three open requests: John Smith (Login Issue, High), Emma\nJohnson (Account Access, High) and Michael Brown (Subscription, Medium). The two\nHigh ones block product usage, so they should be picked up first.\"\n\nNever emit raw JSON, field names, SQL, or the literal line `SEND_EMAIL:` to the\nuser. Those are internal plumbing.\n"
               },
               "tools": {
                 "_input_type": "HandleInput",
@@ -4176,14 +4165,14 @@
     ],
     "edges": [
       {
-        "id": "xy-edge__SQLComponent-sqltool{œdataTypeœ:œSQLComponentœ,œidœ:œSQLComponent-sqltoolœ,œnameœ:œcomponent_as_toolœ,œoutput_typesœ:[œToolœ]}-Agent-analysis{œfieldNameœ:œtoolsœ,œidœ:œAgent-analysisœ,œinputTypesœ:[œToolœ],œtypeœ:œotherœ}",
+        "id": "xy-edge__SQLComponent-sqltool{œdataTypeœ:œext:custom:SupportSQLComponent@extraœ,œidœ:œSQLComponent-sqltoolœ,œnameœ:œcomponent_as_toolœ,œoutput_typesœ:[œToolœ]}-Agent-analysis{œfieldNameœ:œtoolsœ,œidœ:œAgent-analysisœ,œinputTypesœ:[œToolœ],œtypeœ:œotherœ}",
         "source": "SQLComponent-sqltool",
         "target": "Agent-analysis",
-        "sourceHandle": "{œdataTypeœ:œSQLComponentœ,œidœ:œSQLComponent-sqltoolœ,œnameœ:œcomponent_as_toolœ,œoutput_typesœ:[œToolœ]}",
+        "sourceHandle": "{œdataTypeœ:œext:custom:SupportSQLComponent@extraœ,œidœ:œSQLComponent-sqltoolœ,œnameœ:œcomponent_as_toolœ,œoutput_typesœ:[œToolœ]}",
         "targetHandle": "{œfieldNameœ:œtoolsœ,œidœ:œAgent-analysisœ,œinputTypesœ:[œToolœ],œtypeœ:œotherœ}",
         "data": {
           "sourceHandle": {
-            "dataType": "SQLComponent",
+            "dataType": "ext:custom:SupportSQLComponent@extra",
             "id": "SQLComponent-sqltool",
             "name": "component_as_tool",
             "output_types": [
@@ -4439,7 +4428,7 @@
     }
   },
   "is_component": false,
-  "updated_at": "2026-08-17T11:29:08+00:00",
+  "updated_at": "2026-08-17T11:51:10+00:00",
   "webhook": false,
   "endpoint_name": "support-flow",
   "tags": null,
