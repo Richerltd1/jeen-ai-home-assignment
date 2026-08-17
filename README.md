@@ -36,12 +36,13 @@ retrieval module, and a multi-agent workflow.
 │   ├── support-multi-agent-flow.json   # the flow export
 │   ├── build_flow.py              # builds the flow programmatically
 │   ├── prompts.py                 # the three agent system prompts
-│   ├── components/custom/         # custom Gmail Sender tool
+│   ├── components/custom/         # custom SQL (read-only, JSON) + Gmail Sender tools
 │   ├── schema.sql                 # support_requests table + seed data
 │   ├── VIDEO-SCRIPT.md            # recording script
 │   └── README.md                  # architecture, setup, routing table
 ├── scripts/check-secrets.sh       # credential scanner
 ├── .githooks/pre-commit           # blocks commits containing secrets
+├── HOW-IT-WORKS.md                # full walkthrough + design rationale
 └── SECURITY.md                    # how credentials are handled
 ```
 
@@ -73,8 +74,14 @@ of issues that would otherwise have shipped:
 - Langflow hardcodes `tool_name="Call_Agent"` for every Agent exposed as a tool,
   so two specialist agents on one orchestrator collide: it asked for Analysis and
   reached Response, which has no database access.
-- The inter-agent contract was markdown, which looked like a finished answer and
-  got pasted to the user verbatim. It is now JSON.
+- Langflow's built-in SQL component returns a pandas DataFrame rendered as a
+  string, and pandas elides middle columns as `...`. `email`, `category` and
+  `priority` never reached the agent, which then invented them — a real Billing
+  ticket was reported as "Technical Support" with a null email. Replaced with a
+  custom read-only component returning JSON.
+- Langflow flattens nested agent-as-tool output into the parent's text, so
+  chaining Analysis → Response duplicated every answer. Questions now use
+  Analysis alone, which also activates fewer components.
 - Gemini's free tier allows 20 requests per day *per model per project*.
 
 **Security**
