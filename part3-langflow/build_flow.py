@@ -28,7 +28,7 @@ carries a reference and never the secret itself.
 
 Usage:
     python build_flow.py                 # create or update the flow
-    python build_flow.py --export out.json
+    python build_flow.py --export      # also write the flow JSON to disk
 """
 
 from __future__ import annotations
@@ -39,11 +39,16 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 
 from prompts import ANALYSIS_PROMPT, ORCHESTRATOR_PROMPT, RESPONSE_PROMPT
 
 LANGFLOW_URL = "http://127.0.0.1:7860"
 FLOW_NAME = "Support Multi-Agent Flow"
+
+# Fixed export destination. Deliberately a constant, not a CLI argument.
+EXPORT_FILENAME = "support-multi-agent-flow.json"
+EXPORT_PATH = Path(__file__).resolve().parent / EXPORT_FILENAME
 
 # Langflow's bundled dropdown still lists gemini-2.5-flash, which now returns 404
 # for new API keys -- the option list is stale, so model names are set explicitly.
@@ -453,8 +458,18 @@ def build(catalog: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--export", help="Also write the flow JSON to this path.")
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help=f"Also write the flow JSON to {EXPORT_FILENAME} next to this script.",
+    )
     args = parser.parse_args()
+
+    # The destination is a module constant, never derived from user input, so no
+    # argument can influence where this writes. An earlier version accepted an
+    # arbitrary path; the flexibility was never used and only created a
+    # path-traversal surface.
+    export_path = EXPORT_PATH if args.export else None
 
     token = get_token()
     catalog = load_catalog(token)
@@ -496,11 +511,11 @@ def main() -> int:
     print(f"  endpoint      : {LANGFLOW_URL}/api/v1/run/support-flow")
     print(f"  nodes / edges : {len(graph['nodes'])} / {len(graph['edges'])}")
 
-    if args.export:
+    if export_path is not None:
         status, full = api("GET", f"/api/v1/flows/{flow_id}", token)
-        with open(args.export, "w", encoding="utf-8") as handle:
+        with export_path.open("w", encoding="utf-8") as handle:
             json.dump(full, handle, indent=2, ensure_ascii=False)
-        print(f"  exported      : {args.export}")
+        print(f"  exported      : {export_path}")
 
     return 0
 
